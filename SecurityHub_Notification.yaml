@@ -1,0 +1,137 @@
+# Security Hub → EventBridge → SNS → Chatbot → Slack
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Slack notifications for security hub
+
+Parameters: 
+  SnsTopicName:
+    Type: String
+    Default: SecurityHubTopic
+  SlackWorkspaceId:
+    Type: String
+    Default: XXXXXXXXX
+  SlackChannelId:
+    Type: String
+    Default: YYYYYYYYY
+
+Resources:
+#SNS#
+  SNST:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: SecurityHubTopic
+  SNSTP:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: default_policy_ID
+        Version: "2012-10-17"
+        Statement:
+        - Sid: default_statement_ID
+          Effect: Allow
+          Principal:
+            AWS: "*"
+          Action:
+            - "SNS:GetTopicAttributes"
+            - "SNS:SetTopicAttributes"
+            - "SNS:AddPermission"
+            - "SNS:RemovePermission"
+            - "SNS:DeleteTopic"
+            - "SNS:Subscribe"
+            - "SNS:ListSubscriptionsByTopic"
+            - "SNS:Publish"
+            - "SNS:Receive"
+          Resource: !Ref SNST
+          Condition:
+            StringEquals:
+              "AWS:SourceOwner": !Ref "AWS::AccountId"
+        - Sid: AWSEvents_SecurityHubFindings_Id123
+          Effect: Allow
+          Principal:
+            Service:
+            - "events.amazonaws.com"
+          Action: "sns:Publish"
+          Resource: !Ref SNST
+      Topics:
+      - !Ref SNST
+
+#EventBridge#
+  ER:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: SecurityHubFindings
+      EventPattern: {
+                      "source": [
+                        "aws.securityhub"
+                      ],
+                      "detail-type": [
+                        "Security Hub Findings - Imported"
+                      ],
+                      "detail": {
+                        "findings":
+                          {
+                            "Compliance": {
+                              "Status": [
+                                {
+                                 "anything-but": "PASSED"
+                                }
+                              ]
+                            },
+                            "Severity": {
+                              "Label": [
+                                 "CRITICAL",
+                                 "HIGH"
+                               ]
+                            },
+                            "Workflow": {
+                              "Status": [
+                                 "NEW"
+                             ]
+                            },
+                            "RecordState": [
+                              "ACTIVE"
+                            ]
+                          }
+                      }
+                    }
+      State: ENABLED
+      Targets:
+        - Arn: !Ref SNST
+          Id: SNST
+      EventBusName: default
+
+#Chatbot用 IAMロール
+  SecurityHubIamRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      RoleName: SecurityHubIamRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: "sts:AssumeRole"
+            Principal:
+              Service: "chatbot.amazonaws.com"
+      Policies: 
+        - PolicyName: SecurityHub-NotificationsOnly-Policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Action:
+                  - "cloudwatch:Describe*"
+                  - "cloudwatch:Get*"
+                  - "cloudwatch:List*"
+                Effect: "Allow"
+                Resource: "*"
+
+#Chatbot
+  SecurityHubConfiguration:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties: 
+      ConfigurationName: SecurityHub-Chatbot-SlackChanel
+      IamRoleArn: !GetAtt SecurityHubIamRole.Arn
+      LoggingLevel: ERROR
+      SlackChannelId: !Ref SlackChannelId
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SnsTopicArns: 
+        - !Sub 'arn:aws:sns:ap-northeast-1:${AWS::AccountId}:${SnsTopicName}' 
