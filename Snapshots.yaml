@@ -1,0 +1,685 @@
+# in the middle
+
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: SnapShots
+
+Parameters:
+  EnvKeyName:
+    Type: String
+    Description: 'Env key.'
+    Default: Env
+  EnvValueName:
+    Type: String
+    Description: 'Env Value.'
+    Default: Env_Value
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Tag to Env
+        Parameters:
+          - EnvKeyName
+          - EnvValueName
+
+Globals:
+  Function:
+    AutoPublishAlias: live
+    Handler: index.lambda_handler
+    MemorySize: 256
+    Runtime: python3.11
+    Timeout: 180
+    Tags:
+      Env: !Ref EnvValueName
+
+Resources:
+# for CreatSnapshot
+## Lambda
+  CreateSnapshotLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      InlineCode: |
+        import boto3
+
+        def get_snapshots_by_tag(tag_key, tag_value):
+            ec2_client = boto3.client('ec2', region_name='ap-northeast-1')
+
+            response = ec2_client.describe_instances(
+                Filters=[
+                    {
+                        'Name': f'tag:{tag_key}',
+                        'Values': [tag_value]
+                    }
+                ]
+            )
+
+            instance_ids = []
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    instance_ids.append(instance['InstanceId'])
+
+            snapshots = []
+            if instance_ids:
+                response = ec2_client.describe_snapshots(
+                    Filters=[
+                        {
+                            'Name': 'volume-id',
+                            'Values': instance_ids
+                        }
+                    ]
+                )
+                snapshots = response['Snapshots']
+
+            return snapshots
+
+        if __name__ == "__main__":
+            tag_key = "Name"
+            tag_value = "Web"
+
+            snapshots = get_snapshots_by_tag(tag_key, tag_value)
+            
+            for snapshot in snapshots:
+                print(f"Snapshot ID: {snapshot['SnapshotId']}, Volume ID: {snapshot['VolumeId']}")
+      FunctionName: !Sub ${EnvValueName}_CreateSnapshotLambdaFunction
+      Description: CreateSnapshot
+      Role: !GetAtt CreateSnapshotLambdaFunctionRole.Arn
+
+## IAMRole
+  CreateSnapshotLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CreateSnapshotPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - ec2:CreateSnapshots
+                  - ec2:DescribeSnapshots
+                  - ec2:CreateTags
+                Resource: '*'
+        - PolicyName: CreateSnapshotLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CreateSnapshotCloudWatchLogs.Arn
+      RoleName: !Sub ${EnvValueName}_CreateSnapshotLambdaFunctionRole
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+## CloudWatchLogs
+  CreateSnapshotCloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvValueName}_CreateSnapshotLambdaFunction
+      RetentionInDays: 60
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+# for DescribeSnapshot
+## Lambda
+  DescribeSnapshotLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      InlineCode: |
+        import boto3
+        import json
+
+        def lambda_handler(event, context):
+            # AWSリソースを操作するためのセッションを作成
+            ec2_client = boto3.client('ec2')
+
+            # スナップショットIDのリスト（Step Functionsの入力から取得することができます）
+            snapshot_ids = event.get('snapshot_ids', [])
+            
+            if not snapshot_ids:
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps({
+                        'message': 'No snapshot IDs provided in the input.',
+                    }),
+                }
+            
+            # スナップショットのステータスを確認
+            snapshot_statuses = {}
+            for snapshot_id in snapshot_ids:
+                try:
+                    response = ec2_client.describe_snapshots(SnapshotIds=[snapshot_id])
+                    snapshot_status = response['Snapshots'][0]['State']
+                    snapshot_statuses[snapshot_id] = snapshot_status
+                except Exception as e:
+                    snapshot_statuses[snapshot_id] = 'Error: {}'.format(str(e))
+            
+            # すべてのスナップショットが完了しているかどうかを確認
+            all_snapshots_completed = all(status == 'completed' for status in snapshot_statuses.values())
+
+            # 応答を作成
+            response_body = {
+                'snapshot_statuses': snapshot_statuses,
+                'all_snapshots_completed': all_snapshots_completed,
+            }
+
+            if all_snapshots_completed:
+                response_body['message'] = 'All snapshots have completed successfully.'
+            else:
+                response_body['message'] = 'Not all snapshots have completed yet.'
+
+            return {
+                'statusCode': 200,
+                'body': json.dumps(response_body),
+            }
+          
+      FunctionName: !Sub ${EnvValueName}_DescribeSnapshotLambdaFunction
+      Description: DescribeSnapshot
+      Role: !GetAtt DescribeSnapshotLambdaFunctionRole.Arn
+
+## IAMRole
+  DescribeSnapshotLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DescribeSnapshotPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:DescribeSnapshots
+                Resource: '*'
+        - PolicyName: DescribeSnapshotLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt DescribeSnapshotCloudWatchLogs.Arn
+      RoleName: !Sub ${EnvValueName}_DescribeSnapshotLambdaFunctionRole
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+## CloudWatchLogs
+  DescribeSnapshotCloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvValueName}_DescribeSnapshotLambdaFunction
+      RetentionInDays: 60
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+
+# for DeleteSnapshot
+## Lambda
+  DeleteSnapshotLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      InlineCode: |
+          import boto3
+          from datetime import datetime, timedelta, timezone
+
+          def lambda_handler(event, context):
+              ec2 = boto3.client('ec2')
+              
+              # 今日の日付を取得
+              today = datetime.now(timezone.utc)
+              
+              # 7日前の日付を計算
+              seven_days_ago = today - timedelta(days=7)
+              
+              # スナップショットの一覧を取得
+              response = ec2.describe_snapshots(OwnerIds=['self'])
+              
+              # スナップショットの情報を処理
+              for snapshot in response['Snapshots']:
+                  snapshot_time = snapshot['StartTime']
+                  
+                  # スナップショットが7日を超えているかをチェック
+                  if snapshot_time < seven_days_ago:
+                      snapshot_id = snapshot['SnapshotId']
+                      
+                      # スナップショットを削除
+                      ec2.delete_snapshot(SnapshotId=snapshot_id)
+                      print(f"Deleted snapshot: {snapshot_id}")
+              
+              return {
+                  'statusCode': 200,
+                  'body': 'Snapshot management completed'
+              }
+      FunctionName: !Sub ${EnvValueName}_DeleteSnapshotLambdaFunction
+      Description: DeleteSnapshot
+      Role: !GetAtt DeleteSnapshotLambdaFunctionRole.Arn
+
+## IAMRole
+  DeleteSnapshotLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeleteSnapshotPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:DescribeSnapshots
+                  - ec2:DeleteSnapshot
+                Resource: '*'
+        - PolicyName: DeleteSnapshotLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt DeleteSnapshotCloudWatchLogs.Arn
+      RoleName: !Sub ${EnvValueName}_DeleteSnapshotLambdaFunctionRole
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+## CloudWatchLogs
+  DeleteSnapshotCloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvValueName}_DeleteSnapshotLambdaFunction
+      RetentionInDays: 60
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+# for CopySnapshot
+## Lambda
+  CopySnapshotLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      InlineCode: |
+          import boto3
+
+          def lambda_handler(event, context):
+              source_region = 'ap-northeast-1'  # コピー元リージョン
+              destination_region = 'ap-northeast-3'  # コピー先リージョン
+              snapshot_id = event['SnapshotId']  # スナップショットID
+
+              # コピー元リージョンのEC2クライアントを作成
+              source_ec2 = boto3.client('ec2', region_name=source_region)
+
+              # コピー先リージョンのEC2クライアントを作成
+              destination_ec2 = boto3.client('ec2', region_name=destination_region)
+
+              # スナップショットをコピー
+              response = destination_ec2.copy_snapshot(
+                  SourceRegion=source_region,
+                  SourceSnapshotId=snapshot_id
+              )
+
+              copied_snapshot_id = response['SnapshotId']
+              return {'CopiedSnapshotId': copied_snapshot_id}
+      FunctionName: !Sub ${EnvValueName}_CopySnapshotLambdaFunction
+      Description: CopySnapshot
+      Role: !GetAtt CopySnapshotLambdaFunctionRole.Arn
+
+## IAMRole
+  CopySnapshotLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CopySnapshotPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:CopySnapshot
+                Resource: '*'
+        - PolicyName: CopySnapshotLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CopySnapshotCloudWatchLogs.Arn
+      RoleName: !Sub ${EnvValueName}_CopySnapshotLambdaFunctionRole
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+## CloudWatchLogs
+  CopySnapshotCloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvValueName}_CopySnapshotLambdaFunction
+      RetentionInDays: 60
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+# StepFunctions
+## StepFunctions
+  SnapshotStepFunctionsStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Definition:
+          {
+          "Comment": "A Snapshot of my state machine",
+          "StartAt": "ServiceStop",
+          "States": {
+            "ServiceStop": {
+              "Type": "Task",
+              "Parameters": {
+                "DocumentName": "AWS-RunShellScript",
+                "Parameters": {
+                  "commands": [
+                    "#!/bin/bash",
+                    "sudo systemctl stop httpd"
+                  ]
+                },
+                "Targets": [
+                  {
+                    "Key": "tag:Name",
+                    "Values": [
+                      "Web"
+                    ]
+                  }
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "Next": "ServiceStopWait",
+              "ResultPath": "$.ServiceStop"
+            },
+            "ServiceStopWait": {
+              "Type": "Wait",
+              "Seconds": 5,
+              "Next": "ServiceStopList"
+            },
+            "ServiceStopList": {
+              "Type": "Task",
+              "Next": "ServiceStopStatus",
+              "Parameters": {
+                "CommandId.$": "$.ServiceStop.Command.CommandId"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:listCommands",
+              "ResultPath": "$.ServiceStopList"
+            },
+            "ServiceStopStatus": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.ServiceStopList.Commands[0].Status",
+                  "StringEquals": "Success",
+                  "Next": "DescribeInstances"
+                }
+              ],
+              "Default": "ServiceStopWait"
+            },
+            "DescribeInstances": {
+              "Type": "Task",
+              "Parameters": {
+                "Filters": [
+                  {
+                    "Name": "tag:Name",
+                    "Values": [
+                      "Web"
+                    ]
+                  }
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:describeInstances",
+              "ResultPath": "$.DescribeInstances",
+              "Next": "CreateSnapshots"
+            },
+            "CreateSnapshots": {
+              "Type": "Task",
+              "Parameters": {
+                "InstanceSpecification": {
+                  "InstanceId.$": "$.DescribeInstances.Reservations[0].Instances[0].InstanceId"
+                }
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:createSnapshots",
+              "ResultPath": "$.CreateSnapshots",
+              "Next": "CreateSnapshotsWait"
+            },
+            "CreateSnapshotsWait": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "DescribeSnapshots"
+            },
+            "DescribeSnapshots": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:ec2:describeSnapshots",
+              "Parameters": {
+                "SnapshotIds.$": "States.Array($.CreateSnapshots.Snapshots[0].SnapshotId)"
+              },
+              "ResultPath": "$.DescribeSnapshots",
+              "Next": "SnapshotsStatus"
+            },
+            "SnapshotsStatus": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.DescribeSnapshots.Snapshots[0].State",
+                  "StringEquals": "completed",
+                  "Next": "ServiceStart"
+                }
+              ],
+              "Default": "SnapshotsStatusWait"
+            },
+            "ServiceStart": {
+              "Type": "Task",
+              "Parameters": {
+                "DocumentName": "AWS-RunShellScript",
+                "Parameters": {
+                  "commands": [
+                    "#!/bin/bash",
+                    "sudo systemctl start httpd"
+                  ]
+                },
+                "Targets": [
+                  {
+                    "Key": "tag:Name",
+                    "Values": [
+                      "Web"
+                    ]
+                  }
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:sendCommand",
+              "Next": "ServiceStartWait",
+              "ResultPath": "$.ServiceStart"
+            },
+            "ServiceStartWait": {
+              "Type": "Wait",
+              "Seconds": 5,
+              "Next": "ServiceStartList"
+            },
+            "ServiceStartList": {
+              "Type": "Task",
+              "Next": "ServiceStartStatus",
+              "Parameters": {
+                "CommandId.$": "$.ServiceStart.Command.CommandId"
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ssm:listCommands",
+              "ResultPath": "$.ServiceStartList"
+            },
+            "ServiceStartStatus": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.ServiceStartList.Commands[0].Status",
+                  "StringEquals": "Success",
+                  "Next": "Parallel"
+                }
+              ],
+              "Default": "ServiceStartWait"
+            },
+            "Parallel": {
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "DeleteSnapshot",
+                  "States": {
+                    "DeleteSnapshot": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:lambda:invoke",
+                      "OutputPath": "$.Payload",
+                      "Parameters": {
+                        "FunctionName": "${DeleteSnapshotLambdaFunction}",
+                        "Payload.$": "$.CreateSnapshots.Snapshots[0]"
+                      },
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "CopySnapshot",
+                  "States": {
+                    "CopySnapshot": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::aws-sdk:lambda:invoke",
+                      "OutputPath": "$.Payload",
+                      "Parameters": {
+                        "FunctionName": "${CopySnapshotLambdaFunction}",
+                        "Payload.$": "$.CreateSnapshots.Snapshots[0]"
+                      },
+                      "End": true
+                    }
+                  }
+                }
+              ],
+              "Next": "Success"
+            },
+            "Success": {
+              "Type": "Succeed"
+            },
+            "SnapshotsStatusWait": {
+              "Type": "Wait",
+              "Seconds": 30,
+              "Next": "DescribeSnapshots"
+            }
+          }
+        }
+      DefinitionSubstitutions:
+        DeleteSnapshotLambdaFunction: !Ref DeleteSnapshotLambdaFunction
+        CopySnapshotLambdaFunction: !Ref CopySnapshotLambdaFunction
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt SnapshotStepFunctionsCloudWatchLogs.Arn
+        IncludeExecutionData: True
+        Level: ALL
+      Name: !Sub ${EnvValueName}_SnapshotStateMachine
+      Role: !GetAtt SnapshotStepFunctionsRole.Arn
+      Tags:
+        Env: !Ref EnvValueName
+
+## IAMRole
+  SnapshotStepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SnapshotStepFunctionsEC2Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - ec2:describeSnapshots
+                  - ec2:DescribeVolumes
+                  - ssm:ListCommands
+                  - ssm:SendCommand
+                Resource: '*'
+        - PolicyName: SnapshotStepFunctionsLambdaPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - lambda:InvokeFunction
+                Resource: 
+                  - !GetAtt CreateSnapshotLambdaFunction.Arn
+                  - !GetAtt DeleteSnapshotLambdaFunction.Arn
+                  - !GetAtt CopySnapshotLambdaFunction.Arn
+        - PolicyName: SnapshotStepFunctionsLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogDelivery
+                  - logs:CreateLogStream
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutLogEvents
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+      RoleName: !Sub ${EnvValueName}_SnapshotStepFunctionsRole
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
+
+## CloudWatchLogs
+  SnapshotStepFunctionsCloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EnvValueName}_SnapshotStateMachine
+      RetentionInDays: 60
+      Tags:
+        - Key: !Ref EnvKeyName
+          Value: !Ref EnvValueName
