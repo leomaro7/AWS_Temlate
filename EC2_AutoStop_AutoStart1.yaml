@@ -1,0 +1,575 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: Auto Stop EC2 instances and Auto Start EC2 instances
+
+Parameters:
+  ProductKeyName:
+    Type: String
+    Description: 'EC2 instance product key.'
+    Default: Product
+  ProductValueName:
+    Type: String
+    Description: 'EC2 instance product Value.'
+    Default: Test
+  StopKeyName:
+    Type: String
+    Description: 'The key for auto stopping EC2 instances.'
+    Default: Test_Auto_Stop_EC2
+  StopValueName1:
+    Type: String
+    Description: 'The value for auto stopping EC2 instances.'
+    Default: PM8
+  StopValueName2:
+    Type: String
+    Description: 'The value for auto stopping EC2 instances.'
+    Default: PM9
+  StopValueName3:
+    Type: String
+    Description: 'The value for auto stopping EC2 instances.'
+    Default: PM10
+  StartKeyName:
+    Type: String
+    Description: 'The key for auto starting EC2 instances.'
+    Default: Test_Auto_Start_EC2
+  StartValueName1:
+    Type: String
+    Description: 'The value for auto starting EC2 instances.'
+    Default: AM8
+  StartValueName2:
+    Type: String
+    Description: 'The value for auto starting EC2 instances.'
+    Default: AM9
+  StartValueName3:
+    Type: String
+    Description: 'The value for auto starting EC2 instances.'
+    Default: AM10
+  StopEventBridgeRuleState1:
+    Type: String
+    Description: 'Choose between DISABLED and ENABLED for Stop EventBridgeRule State1.'
+    Default: DISABLED
+    AllowedValues:
+      - DISABLED
+      - ENABLED
+  StopEventBridgeRuleState2:
+    Type: String
+    Description: 'Choose between DISABLED and ENABLED for Stop EventBridgeRule State2.'
+    Default: DISABLED
+    AllowedValues:
+      - DISABLED
+      - ENABLED
+  StopEventBridgeRuleState3:
+    Type: String
+    Description: 'Choose between DISABLED and ENABLED for Start EventBridgeRule State3.'
+    Default: DISABLED
+    AllowedValues:
+      - DISABLED
+      - ENABLED
+  StartEventBridgeRuleState1:
+    Type: String
+    Description: 'Choose between DISABLED and ENABLED for Start EventBridgeRule State1.'
+    Default: DISABLED
+    AllowedValues:
+      - DISABLED
+      - ENABLED
+  StartEventBridgeRuleState2:
+    Type: String
+    Description: 'Choose between DISABLED and ENABLED for Start EventBridgeRule State2.'
+    Default: DISABLED
+    AllowedValues:
+      - DISABLED
+      - ENABLED
+  StartEventBridgeRuleState3:
+    Type: String
+    Description: 'Choose between DISABLED and ENABLED for Start EventBridgeRule State3.'
+    Default: DISABLED
+    AllowedValues:
+      - DISABLED
+      - ENABLED
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Product tags
+        Parameters:
+          - ProductKeyName
+          - ProductValueName
+      - Label:
+          default: Tag to stop EC2 instance
+        Parameters:
+          - StopKeyName
+          - StopValueName1
+          - StopValueName2
+          - StopValueName3
+      - Label:
+          default: Tag to start EC2 instance
+        Parameters:
+          - StartKeyName
+          - StartValueName1
+          - StartValueName2
+          - StartValueName3
+      - Label:
+          default: State on Stop EventBridgeRule
+        Parameters:
+          - StopEventBridgeRuleState1
+          - StopEventBridgeRuleState2
+          - StopEventBridgeRuleState3
+      - Label:
+          default: State on Start EventBridgeRule
+        Parameters:
+          - StartEventBridgeRuleState1
+          - StartEventBridgeRuleState2
+          - StartEventBridgeRuleState3
+
+Globals:
+  Function:
+    AutoPublishAlias: live
+    Handler: index.lambda_handler
+    MemorySize: 256
+    Runtime: python3.10
+    Timeout: 360
+    Tags:
+      Product: !Ref ProductValueName
+
+Resources:
+# for stopping
+## Lambda
+  StopEc2InstancesLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      InlineCode: |
+          import logging
+          import os
+          import time
+
+          import boto3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              try:
+                  ec2_client = boto3.client('ec2')
+                  instances_to_stop = []
+
+                  # Get all running instances with stop tag.
+                  rule_name = event['resources'][0].split('/')[-1]
+
+                  stop_event_rules = {
+                      os.environ['StopEc2InstancesEventBridgeRule1']: {
+                          'tag_key': os.environ['StopKeyName'],
+                          'tag_value': os.environ['StopValueName1']
+                      },
+                      os.environ['StopEc2InstancesEventBridgeRule2']: {
+                          'tag_key': os.environ['StopKeyName'],
+                          'tag_value': os.environ['StopValueName2']
+                      },
+                      os.environ['StopEc2InstancesEventBridgeRule3']: {
+                          'tag_key': os.environ['StopKeyName'],
+                          'tag_value': os.environ['StopValueName3']
+                      }
+                  }
+
+                  if rule_name not in stop_event_rules:
+                      logger.warning("StatusCode:400 Unknown rule name. EC2 instances not stopped.")
+                      return
+
+                  tag_key = stop_event_rules[rule_name]['tag_key']
+                  tag_value = stop_event_rules[rule_name]['tag_value']
+
+                  # Get all running EC2 instance with a specific tag.
+                  response = ec2_client.describe_instances(Filters=[
+                      {
+                          'Name': f'tag:{tag_key}',
+                          'Values': [tag_value]
+                      },
+                      {
+                          'Name': 'instance-state-name',
+                          'Values': ['running']
+                      }
+                  ])
+
+                  for reservation in response['Reservations']:
+                      for instance in reservation['Instances']:
+                          instances_to_stop.append(instance['InstanceId'])
+
+                  # Stop the EC2 instance.
+                  if instances_to_stop:
+                      ec2_client.stop_instances(InstanceIds=instances_to_stop)
+                      logger.info(f"Stopped instances ({rule_name}): {instances_to_stop}")
+
+                      # Wait for instances to be stopped.
+                      max_wait_time = 300
+                      sleep_interval = 15
+                      waited_time = 0
+
+                      while waited_time < max_wait_time:
+                          response = ec2_client.describe_instances(InstanceIds=instances_to_stop)
+                          instance_states = [instance['State']['Name'] for reservation in response['Reservations'] for instance in reservation['Instances']]
+
+                          if all(state == 'stopped' for state in instance_states):
+                              logger.info(f"All instances state stopped: {instances_to_stop}")
+                              break
+
+                          time.sleep(sleep_interval)
+                          waited_time += sleep_interval
+
+                      if waited_time >= max_wait_time:
+                          logger.error(f"StatusCode:504 Timeout: Some instances did not stop within {max_wait_time} seconds.")
+                          return
+
+                      else:
+                          logger.info(f"StatusCode:200 EC2 instances stoped successfully: {instances_to_stop}")
+                          return
+
+                  else:
+                      logger.warning(f"StatusCode:404 Could not find an instance of the specified tag. ({rule_name}).")
+                      return
+
+              except Exception as e:
+                  logger.error(f"StatusCode:500 An error occurred: {str(e)}")
+                  raise e
+
+      Environment:
+        Variables:
+          StopKeyName: !Ref StopKeyName
+          StopValueName1: !Ref StopValueName1
+          StopValueName2: !Ref StopValueName2
+          StopValueName3: !Ref StopValueName3          
+          StopEc2InstancesEventBridgeRule1: !Sub ${ProductValueName}_StopEc2InstancesEventBridgeRule1
+          StopEc2InstancesEventBridgeRule2: !Sub ${ProductValueName}_StopEc2InstancesEventBridgeRule2
+          StopEc2InstancesEventBridgeRule3: !Sub ${ProductValueName}_StopEc2InstancesEventBridgeRule3
+      FunctionName: !Sub ${ProductValueName}_StopEc2InstancesLambdaFunction
+      Description: Auto Stop EC2 instances
+      Role: !GetAtt StopEc2InstancesLambdaFunctionRole.Arn
+  
+  StopEc2InstancesLambdaEventPermission1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StopEc2InstancesLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopEc2InstancesEventBridgeRule1.Arn
+
+  StopEc2InstancesLambdaEventPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StopEc2InstancesLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopEc2InstancesEventBridgeRule2.Arn
+
+  StopEc2InstancesLambdaEventPermission3:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StopEc2InstancesLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopEc2InstancesEventBridgeRule3.Arn
+
+## IAMRole
+  StopEc2InstancesLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StopEc2InstancesPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - ec2:StopInstances
+                Resource: '*'
+        - PolicyName: StopEc2InstancesLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt StopEc2InstancesCloudWatchLogs.Arn
+      RoleName: !Sub ${ProductValueName}_StopEc2InstancesLambdaFunctionRole
+      Tags:
+        - Key: !Ref ProductKeyName
+          Value: !Ref ProductValueName
+
+## CloudWatchLogs
+  StopEc2InstancesCloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProductValueName}_StopEc2InstancesLambdaFunction
+      RetentionInDays: 60
+      Tags:
+        - Key: !Ref ProductKeyName
+          Value: !Ref ProductValueName
+
+## EventBridgeRule
+  StopEc2InstancesEventBridgeRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProductValueName}_StopEc2InstancesEventBridgeRule1
+      ScheduleExpression: cron(0 11 ? * MON-FRI *)
+      State: !Ref StopEventBridgeRuleState1
+      Targets: 
+        - Arn: !GetAtt StopEc2InstancesLambdaFunction.Arn
+          Id: TargetFunctionV1
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
+
+  StopEc2InstancesEventBridgeRule2:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProductValueName}_StopEc2InstancesEventBridgeRule2
+      ScheduleExpression: cron(0 12 ? * MON-FRI *)
+      State: !Ref StopEventBridgeRuleState2
+      Targets: 
+        - Arn: !GetAtt StopEc2InstancesLambdaFunction.Arn
+          Id: TargetFunctionV1
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
+
+  StopEc2InstancesEventBridgeRule3:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProductValueName}_StopEc2InstancesEventBridgeRule3
+      ScheduleExpression: cron(0 13 ? * MON-FRI *)
+      State: !Ref StopEventBridgeRuleState3
+      Targets: 
+        - Arn: !GetAtt StopEc2InstancesLambdaFunction.Arn
+          Id: TargetFunctionV1
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
+
+# for starting
+## Lambda
+  StartEc2InstancesLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      InlineCode: |
+          import logging
+          import os
+          import time
+
+          import boto3
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              try:
+                  ec2_client = boto3.client('ec2')
+                  instances_to_start = []
+
+                  # Get the name of the EventBridge rule that triggered.
+                  rule_name = event['resources'][0].split('/')[-1]
+
+                  start_event_rules = {
+                      os.environ['StartEc2InstancesEventBridgeRule1']: {
+                          'tag_key': os.environ['StartKeyName'],
+                          'tag_value': os.environ['StartValueName1']
+                      },
+                      os.environ['StartEc2InstancesEventBridgeRule2']: {
+                          'tag_key': os.environ['StartKeyName'],
+                          'tag_value': os.environ['StartValueName2']
+                      },
+                      os.environ['StartEc2InstancesEventBridgeRule3']: {
+                          'tag_key': os.environ['StartKeyName'],
+                          'tag_value': os.environ['StartValueName3']
+                      }
+                  }
+
+                  if rule_name not in start_event_rules:
+                      logger.warning("StatusCode:400 Unknown rule name. EC2 instances not started.")
+                      return
+
+                  tag_key = start_event_rules[rule_name]['tag_key']
+                  tag_value = start_event_rules[rule_name]['tag_value']
+
+                  # Get all stopped instances with the specified tag.
+                  response = ec2_client.describe_instances(Filters=[
+                      {
+                          'Name': f'tag:{tag_key}',
+                          'Values': [tag_value]
+                      },
+                      {
+                          'Name': 'instance-state-name',
+                          'Values': ['stopped']
+                      }
+                  ])
+
+                  for reservation in response['Reservations']:
+                      for instance in reservation['Instances']:
+                          instances_to_start.append(instance['InstanceId'])
+
+                  # Start the EC2 instances.
+                  if instances_to_start:
+                      ec2_client.start_instances(InstanceIds=instances_to_start)
+                      logger.info(f"Started instances ({rule_name}): {instances_to_start}")
+
+                      # Wait for instances to be running.
+                      max_wait_time = 300
+                      sleep_interval = 15
+                      waited_time = 0
+
+                      while waited_time < max_wait_time:
+                          response = ec2_client.describe_instances(InstanceIds=instances_to_start)
+                          instance_states = [instance['State']['Name'] for reservation in response['Reservations'] for instance in reservation['Instances']]
+
+                          if all(state == 'running' for state in instance_states):
+                              logger.info(f"All instances state started: {instances_to_start}")
+                              break
+
+                          time.sleep(sleep_interval)
+                          waited_time += sleep_interval
+
+                      if waited_time >= max_wait_time:
+                          logger.error(f"StatusCode:504 Timeout: Some instances did not start within {max_wait_time} seconds.")
+                          return
+
+                      else:
+                          logger.info(f"StatusCode:200 EC2 instances started successfully: {instances_to_start}")
+                          return
+
+                  else:
+                      logger.warning(f"StatusCode:404 Could not find an instance of the specified tag. ({rule_name}).")
+                      return
+
+              except Exception as e:
+                  logger.error(f"StatusCode:500 An error occurred: {str(e)}")
+                  raise e
+
+      Environment:
+        Variables:
+          StartKeyName: !Ref StartKeyName
+          StartValueName1: !Ref StartValueName1
+          StartValueName2: !Ref StartValueName2
+          StartValueName3: !Ref StartValueName3          
+          StartEc2InstancesEventBridgeRule1: !Sub ${ProductValueName}_StartEc2InstancesEventBridgeRule1
+          StartEc2InstancesEventBridgeRule2: !Sub ${ProductValueName}_StartEc2InstancesEventBridgeRule2
+          StartEc2InstancesEventBridgeRule3: !Sub ${ProductValueName}_StartEc2InstancesEventBridgeRule3
+      FunctionName: !Sub ${ProductValueName}_StartEc2InstancesLambdaFunction
+      Description: Auto Start EC2 instances
+      Role: !GetAtt StartEc2InstancesLambdaFunctionRole.Arn
+  
+  StartEc2InstancesLambdaEventPermission1:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StartEc2InstancesLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartEc2InstancesEventBridgeRule1.Arn
+
+  StartEc2InstancesLambdaEventPermission2:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StartEc2InstancesLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartEc2InstancesEventBridgeRule2.Arn
+
+  StartEc2InstancesLambdaEventPermission3:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref StartEc2InstancesLambdaFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StartEc2InstancesEventBridgeRule3.Arn
+
+## IAMRole
+  StartEc2InstancesLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartEc2InstancesPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ec2:DescribeInstances
+                  - ec2:StartInstances
+                Resource: '*'
+        - PolicyName: StartEc2InstancesLogPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt StartEc2InstancesCloudWatchLogs.Arn
+      RoleName: !Sub ${ProductValueName}_StartEc2InstancesLambdaFunctionRole
+      Tags:
+        - Key: !Ref ProductKeyName
+          Value: !Ref ProductValueName
+
+## CloudWatchLogs
+  StartEc2InstancesCloudWatchLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProductValueName}_StartEc2InstancesLambdaFunction
+      RetentionInDays: 60
+      Tags:
+        - Key: !Ref ProductKeyName
+          Value: !Ref ProductValueName
+
+## EventBridgeRule
+  StartEc2InstancesEventBridgeRule1:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProductValueName}_StartEc2InstancesEventBridgeRule1
+      ScheduleExpression: cron(0 23 ? * MON-FRI *)
+      State: !Ref StartEventBridgeRuleState1
+      Targets: 
+        - Arn: !GetAtt StartEc2InstancesLambdaFunction.Arn
+          Id: TargetFunctionV1
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
+
+  StartEc2InstancesEventBridgeRule2:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProductValueName}_StartEc2InstancesEventBridgeRule2
+      ScheduleExpression: cron(0 0 ? * MON-FRI *)
+      State: !Ref StartEventBridgeRuleState2
+      Targets: 
+        - Arn: !GetAtt StartEc2InstancesLambdaFunction.Arn
+          Id: TargetFunctionV1
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
+
+  StartEc2InstancesEventBridgeRule3:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${ProductValueName}_StartEc2InstancesEventBridgeRule3
+      ScheduleExpression: cron(0 1 ? * MON-FRI *)
+      State: !Ref StartEventBridgeRuleState3
+      Targets: 
+        - Arn: !GetAtt StartEc2InstancesLambdaFunction.Arn
+          Id: TargetFunctionV1
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
