@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: App VPC
+
+Parameters:
+  AZ1a:
+    Type: String
+    Description: Use AZ1a name
+  AZ1c:
+    Type: String
+    Description: Use AZ1c name
+  AppVPCCidrBlock:
+    Type: String
+    Description: CidrBlock of App VPC
+  AppPubricSubnetAZ1aCidrBlock:
+    Type: String
+    Description: CidrBlock of PublicSubnet1a
+  AppPubricSubnetAZ1cCidrBlock:
+    Type: String
+    Description: CidrBlock of PublicSubnet1c
+  Key:
+    Type: String
+    Description: Key of Tags
+  Value:
+    Type: String
+    Description: Value of Tags
+  SSHRDPCidrBlock:
+    Type: String
+    Description: CidrBlock of SSH RDS
+  ClientVPNEndpoint:
+    Type: String
+    Description: Client VPN Endpoint
+  ClientVPNNATGatewayEIP:
+    Type: String
+    Description: Client VPN NATGateway EIP  
+  ClientVPNPrivateSubnetAZ1a:
+    Type: String
+    Description: Client VPN PrivateSubnetAZ1a
+  AMIApache:
+    Type: String
+    Description: AMI Apache
+  AMIIIS:
+    Type: String
+    Description: AMI IIS
+  KeyName:
+    Type: String
+    Description: Key Name
+
+Resources:
+# VPC
+  AppVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref AppVPCCidrBlock
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+# Subnet
+  AppPubricSubnetAZ1a:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AppVPC
+      CidrBlock: !Ref AppPubricSubnetAZ1aCidrBlock
+      AvailabilityZone: !Ref AZ1a
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+  AppPubricSubnetAZ1c:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref AppVPC
+      CidrBlock: !Ref AppPubricSubnetAZ1cCidrBlock
+      AvailabilityZone: !Ref AZ1c
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+# IGW
+  AppInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+  AppInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref AppVPC
+      InternetGatewayId: !Ref AppInternetGateway
+
+# RouteTable
+  AppPubricRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref AppVPC
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+  AppPubricRouteTableAssociationAZ1a:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppPubricSubnetAZ1a
+      RouteTableId: !Ref AppPubricRouteTable
+
+  AppPubricRouteTableAssociationAZ1c:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppPubricSubnetAZ1c
+      RouteTableId: !Ref AppPubricRouteTable
+
+  AppPubricRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppPubricRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref AppInternetGateway
+
+# EC2 for Apache
+  AppEC2001: 
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref AMIApache
+      KeyName: !Ref KeyName
+      InstanceType: t2.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          SubnetId: !Ref AppPubricSubnetAZ1a
+          PrivateIpAddress: 10.0.1.10
+          GroupSet:
+            - !Ref AppSecurityGroupEC2001
+      Tags:
+        - Key: !Ref Key
+          Value: !Ref Value
+
+  AppEC2001EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref AppEC2001
+      Domain: vpc
+
+  AppSecurityGroupEC2001:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group EC2 001
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHRDPCidrBlock
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref SSHRDPCidrBlock
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Sub '${ClientVPNNATGatewayEIP}/32'
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 172.32.1.0/24
+      VpcId: !Ref AppVPC
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+#EC2 for IIS
+  AppEC2002: 
+    Type: AWS::EC2::Instance
+    Properties: 
+      ImageId: !Ref AMIIIS
+      KeyName: !Ref KeyName
+      InstanceType: t3.small
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: false
+          DeviceIndex: 0
+          SubnetId: !Ref AppPubricSubnetAZ1c
+          PrivateIpAddress: 10.0.2.10
+          GroupSet:
+            - !Ref AppSecurityGroupEC2002        
+      Tags:
+        - Key: !Ref Key
+          Value: !Ref Value
+
+  AppEC2002EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref AppEC2002
+      Domain: vpc
+
+  AppSecurityGroupEC2002:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group EC2 002
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3389
+          ToPort: 3389
+          CidrIp: !Ref SSHRDPCidrBlock
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref SSHRDPCidrBlock
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Sub '${ClientVPNNATGatewayEIP}/32'
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 172.32.1.0/24
+      VpcId: !Ref AppVPC
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+# ClientVPNRoute EIP作成後にデプロイするためAppで作成
+  ClientVPNRouteAppEC2001EIP:
+    Type: AWS::EC2::ClientVpnRoute
+    Properties:
+      ClientVpnEndpointId: !Ref ClientVPNEndpoint
+      TargetVpcSubnetId: !Ref ClientVPNPrivateSubnetAZ1a
+      DestinationCidrBlock:
+        Fn::Sub: "${AppEC2001EIP}/32"
+      Description: for AppEC2001EIP
+
+  ClientVPNRouteAppEC2002EIP:
+    Type: AWS::EC2::ClientVpnRoute
+    Properties:
+      ClientVpnEndpointId: !Ref ClientVPNEndpoint
+      TargetVpcSubnetId: !Ref ClientVPNPrivateSubnetAZ1a
+      DestinationCidrBlock:
+        Fn::Sub: "${AppEC2002EIP}/32"
+      Description: for AppEC2002EIP
+
+Outputs:
+  AppEC2001EIP:
+    Description: EC2001 EIP
+    Value: !Ref AppEC2001EIP
+
+  AppEC2002EIP:
+    Description: EC2002 EIP
+    Value: !Ref AppEC2002EIP
+
+  AppVPC:
+    Description: Client VPN VPC
+    Value: !Ref AppVPC
+
+  AppPubricRouteTable:
+    Description: App Pubric RouteTable
+    Value: !Ref AppPubricRouteTable

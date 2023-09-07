@@ -1,0 +1,48 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: VPC Peering
+
+Parameters:
+  AppVPC:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID of App VPC
+  AppPubricRouteTable:
+    Type: String
+    Description: RouteTable of App Pubric 
+  ClientVPNVPC:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID of Client VPN VPC
+  ClientVPNPrivateRouteTableAZ1a:
+    Type: String
+    Description: RouteTable of Client VPN Private
+  Key:
+    Type: String
+    Description: Key of Tags
+  Value:
+    Type: String
+    Description: Value of Tags
+
+Resources:
+# VPCPeering
+  vpcPeeringConnection:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: !Ref ClientVPNVPC
+      PeerVpcId: !Ref AppVPC
+      Tags:
+      - Key: !Ref Key
+        Value: !Ref Value
+
+# PeeringRoute
+  ClientVPNPrivateRouteVPCPeering:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ClientVPNPrivateRouteTableAZ1a
+      DestinationCidrBlock: 10.0.0.0/16
+      VpcPeeringConnectionId: !Ref vpcPeeringConnection
+
+  AppPubricRouteVPCPeering:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppPubricRouteTable
+      DestinationCidrBlock: 172.32.0.0/16
+      VpcPeeringConnectionId: !Ref vpcPeeringConnection

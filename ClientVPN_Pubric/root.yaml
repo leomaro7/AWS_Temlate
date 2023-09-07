@@ -1,0 +1,84 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Client VPN VPC , App VPC
+
+Parameters: 
+  AppVPCTemplate:
+    Description: App VPC template Object URL 
+    Type: String
+    Default: https://XXX.ap-northeast-1.amazonaws.com/cloudformation/app.yaml
+  ClientVPNVPCTemplate:
+    Description: Client VPN VPC template Object URL
+    Type: String
+    Default: https://XXX.ap-northeast-1.amazonaws.com/cloudformation/vpn.yaml
+  VPCpeeringTemplate:
+    Description: VPC peering template Object URL
+    Type: String
+    Default: https://XXX.ap-northeast-1.amazonaws.com/cloudformation/peering.yaml
+  ClientVPNServerCertificateArn:
+    Description: Client VPN ServerCertificateArn
+    Type: String
+  ADPasswordadmin:
+    Description: AD Password admin
+    Type: String  
+  KeyName:
+    Description: Amazon EC2 Key Pair
+    Type: AWS::EC2::KeyPair::KeyName
+  SSHRDPCidrBlock:
+    Description: CidrBlock of SSH RDP
+    Type: String
+
+Resources:
+  AppVPC:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: ClientVPNVPC
+    Properties:
+      TemplateURL: !Ref AppVPCTemplate
+      Parameters: 
+        AZ1a: !Select [0, !GetAZs '' ]
+        AZ1c: !Select [2, !GetAZs '' ]
+        AppVPCCidrBlock: 10.0.0.0/16
+        AppPubricSubnetAZ1aCidrBlock: 10.0.1.0/24
+        AppPubricSubnetAZ1cCidrBlock: 10.0.2.0/24
+        Key: Name
+        Value: App
+        SSHRDPCidrBlock: !Ref SSHRDPCidrBlock
+        ClientVPNEndpoint: !GetAtt ClientVPNVPC.Outputs.ClientVPNEndpoint
+        ClientVPNNATGatewayEIP: !GetAtt ClientVPNVPC.Outputs.ClientVPNNATGatewayEIP
+        ClientVPNPrivateSubnetAZ1a: !GetAtt ClientVPNVPC.Outputs.ClientVPNPrivateSubnetAZ1a
+        AMIApache: ami-XXX ## AMIApache ID
+        AMIIIS: ami-XXX ##AMIIIS Id
+        KeyName: !Ref KeyName
+
+  ClientVPNVPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref ClientVPNVPCTemplate
+      Parameters: 
+        AZ1a: !Select [0, !GetAZs '' ]
+        AZ1c: !Select [2, !GetAZs '' ]
+        ClientVPNVPCCidrBlock: 172.32.0.0/16
+        ClientVPNPrivateSubnetAZ1aCidrBlock: 172.32.1.0/24
+        NATGatewayPubricSubnetAZ1aCidrBlock: 172.32.10.0/24
+        ADPrivateSubnetAZ1aCidrBlock: 172.32.100.0/24
+        ADPrivateSubnetAZ1cCidrBlock: 172.32.200.0/24
+        Key: Name
+        Value: ClientVPN
+        SSHRDPCidrBlock: !Ref SSHRDPCidrBlock
+        ADDomainName: saton.com
+        ADPasswordadmin: !Ref ADPasswordadmin
+        ClientVPNServerCertificateArn: !Ref ClientVPNServerCertificateArn
+        AMIAD: ami-XXX ## AMIAD Id
+        KeyName: !Ref KeyName
+
+  VPCPeering:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: AppVPC
+    Properties:
+      TemplateURL: !Ref VPCpeeringTemplate
+      Parameters: 
+        AppVPC: !GetAtt AppVPC.Outputs.AppVPC
+        AppPubricRouteTable: !GetAtt AppVPC.Outputs.AppPubricRouteTable
+        ClientVPNVPC: !GetAtt ClientVPNVPC.Outputs.ClientVPNVPC
+        ClientVPNPrivateRouteTableAZ1a: !GetAtt ClientVPNVPC.Outputs.ClientVPNPrivateRouteTableAZ1a
+        Key: Name
+        Value: VPCPeering
