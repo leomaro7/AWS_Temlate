@@ -15,7 +15,7 @@ Parameters:
     Default: YYYYYYYYY
 
 Resources:
-#SNS#
+#SNS
   SNST:
     Type: AWS::SNS::Topic
     Properties:
@@ -55,7 +55,7 @@ Resources:
       Topics:
       - !Ref SNST
 
-#EventBridge#
+#EventBridge
   ER:
     Type: AWS::Events::Rule
     Properties:
